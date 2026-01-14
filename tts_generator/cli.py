@@ -1,17 +1,19 @@
 """Command-line interface for TTS Generator."""
 
+from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
 
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
 
 from .parser import parse_file, get_unique_speakers
-from .providers import GoogleTTSProvider, ElevenLabsProvider
+from .providers import GoogleTTSProvider
 from .splicer import AudioSplicer
-from .voices import VoiceManager, list_voices, GOOGLE_VOICES
+from .voices import VoiceManager, GOOGLE_VOICES
 
 
 console = Console()
@@ -44,6 +46,102 @@ def list_available_voices():
     console.print(table)
 
 
+def run_standard_mode(args, lines, speakers, voice_manager, provider):
+    """Run standard (non-audiobook) generation."""
+    splicer = AudioSplicer(
+        provider=provider,
+        voice_manager=voice_manager,
+        pause_ms=args.pause,
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Generating audio...", total=None)
+
+        def update_progress(current, total):
+            progress.update(task, description=f"Generating segment {current}/{total}...")
+
+        audio = splicer.generate_conversation(
+            lines,
+            style_prompt=args.style,
+            progress_callback=update_progress,
+        )
+
+    # Export
+    output_path = Path(args.output)
+    splicer.export(audio, output_path)
+
+    console.print(f"[green]Success![/green] Audio saved to: {output_path}")
+    console.print(f"[dim]Duration:[/dim] {len(audio) / 1000:.1f} seconds")
+
+
+def run_audiobook_mode(args, lines, speakers, voice_manager, provider):
+    """Run audiobook mode with chunking and streaming."""
+    from .chunker import TextChunker
+    from .streaming import StreamingGenerator
+
+    output_path = Path(args.output)
+
+    # Chunk the text
+    console.print("[cyan]Chunking text for audiobook mode...[/cyan]")
+    chunker = TextChunker(
+        max_bytes=3500,
+        max_speakers_per_chunk=2,
+        chapter_pause_ms=args.chapter_pause,
+    )
+    chunks = chunker.chunk(lines)
+    stats = chunker.get_stats(chunks)
+
+    console.print(f"[green]Created:[/green] {stats['chunks']} chunks")
+    console.print(f"[dim]Estimated duration:[/dim] {stats['estimated_duration_min']:.1f} minutes")
+
+    # Check for resume
+    state_path = output_path.with_suffix('.state.json')
+    if args.resume and state_path.exists():
+        console.print("[yellow]Resuming from previous state...[/yellow]")
+    elif state_path.exists() and not args.resume:
+        console.print("[yellow]Warning:[/yellow] State file found. Use --resume to continue, or delete it to start fresh.")
+        if output_path.exists():
+            output_path.unlink()
+        state_path.unlink()
+
+    # Create streaming generator
+    generator = StreamingGenerator(
+        provider=provider,
+        voice_manager=voice_manager,
+        output_path=output_path,
+        pause_ms=args.pause,
+        chapter_pause_ms=args.chapter_pause,
+    )
+
+    # Generate with progress
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Generating audiobook...", total=len(chunks))
+
+        def update_progress(current, total, gen_stats):
+            progress.update(task, completed=current)
+            duration_sec = gen_stats.get("total_duration_ms", 0) / 1000
+            progress.update(task, description=f"Chunk {current}/{total} | {duration_sec:.0f}s generated")
+
+        generator.generate(
+            chunks,
+            progress_callback=update_progress,
+            resume=args.resume,
+        )
+
+    console.print(f"[green]Success![/green] Audiobook saved to: {output_path}")
+    console.print(f"[dim]Total duration:[/dim] {generator.stats['total_duration_ms'] / 1000 / 60:.1f} minutes")
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -51,10 +149,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  tts-generator input.txt -o output.mp3
-  tts-generator conversation.json -o output.wav --provider elevenlabs
+  tts-generator input.txt -o output.wav
   tts-generator input.txt --voices "Speaker A:Kore,Provider:Charon"
   tts-generator --list-voices
+
+Audiobook mode (for large files):
+  tts-generator book.txt -o audiobook.wav --audiobook
+  tts-generator book.txt -o audiobook.wav --audiobook --resume
         """,
     )
 
@@ -65,14 +166,8 @@ Examples:
     )
     parser.add_argument(
         "-o", "--output",
-        default="output.mp3",
-        help="Output audio file (default: output.mp3)",
-    )
-    parser.add_argument(
-        "-p", "--provider",
-        choices=["google", "elevenlabs"],
-        default="google",
-        help="TTS provider to use (default: google)",
+        default="output.wav",
+        help="Output audio file (default: output.wav)",
     )
     parser.add_argument(
         "--voices",
@@ -103,6 +198,24 @@ Examples:
         help="Show voice assignments before generating",
     )
 
+    # Audiobook mode options
+    parser.add_argument(
+        "--audiobook",
+        action="store_true",
+        help="Enable audiobook mode for large files (chunking + streaming)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume interrupted audiobook generation",
+    )
+    parser.add_argument(
+        "--chapter-pause",
+        type=int,
+        default=2000,
+        help="Pause duration at chapter breaks in ms (default: 2000)",
+    )
+
     args = parser.parse_args()
 
     # Handle list-voices flag
@@ -130,7 +243,7 @@ Examples:
         console.print(f"[dim]Speakers:[/dim] {', '.join(speakers)}")
 
         # Set up voice manager
-        voice_manager = VoiceManager(provider=args.provider)
+        voice_manager = VoiceManager(provider="google")
 
         # Apply manual voice assignments if provided
         if args.voices:
@@ -152,45 +265,20 @@ Examples:
             console.print(table)
 
         # Initialize TTS provider
-        if args.provider == "google":
-            provider = GoogleTTSProvider(api_key=args.api_key)
+        provider = GoogleTTSProvider(api_key=args.api_key)
+        console.print("[cyan]Provider:[/cyan] google")
+
+        # Run appropriate mode
+        if args.audiobook:
+            run_audiobook_mode(args, lines, speakers, voice_manager, provider)
         else:
-            provider = ElevenLabsProvider(api_key=args.api_key)
-
-        console.print(f"[cyan]Provider:[/cyan] {args.provider}")
-
-        # Create splicer and generate audio
-        splicer = AudioSplicer(
-            provider=provider,
-            voice_manager=voice_manager,
-            pause_ms=args.pause,
-        )
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console,
-        ) as progress:
-            task = progress.add_task("Generating audio...", total=None)
-
-            def update_progress(current, total):
-                progress.update(task, description=f"Generating segment {current}/{total}...")
-
-            audio = splicer.generate_conversation(
-                lines,
-                style_prompt=args.style,
-                progress_callback=update_progress,
-            )
-
-        # Export
-        output_path = Path(args.output)
-        splicer.export(audio, output_path)
-
-        console.print(f"[green]Success![/green] Audio saved to: {output_path}")
-        console.print(f"[dim]Duration:[/dim] {len(audio) / 1000:.1f} seconds")
+            run_standard_mode(args, lines, speakers, voice_manager, provider)
 
         return 0
 
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow] Use --resume to continue.")
+        return 1
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
         return 1

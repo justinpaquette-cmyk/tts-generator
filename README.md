@@ -55,6 +55,37 @@ python3 -m tts_generator.cli input.txt -o output.wav --style "conversational, wa
 python3 -m tts_generator.cli input.txt -o output.wav --pause 500
 ```
 
+### Audiobook Mode (Large Files)
+```bash
+# Generate audiobook from large text file
+python3 -m tts_generator.cli book.txt -o audiobook.wav --audiobook
+
+# Resume interrupted generation
+python3 -m tts_generator.cli book.txt -o audiobook.wav --audiobook --resume
+
+# Custom chapter pause (default: 2000ms)
+python3 -m tts_generator.cli book.txt -o audiobook.wav --audiobook --chapter-pause 3000
+```
+
+Audiobook mode:
+- Chunks text to stay under API limits (4KB per request)
+- Streams audio directly to disk (memory efficient)
+- Saves progress after each chunk for resume capability
+- Detects chapter markers for longer pauses
+
+### Web GUI
+```bash
+# Launch the Gradio web interface
+python3 -m tts_generator.gui
+```
+
+Features:
+- Paste or type conversation text
+- Auto-detect speakers with "Detect Speakers" button
+- Assign voices to each speaker via dropdowns
+- Audiobook mode toggle for large files
+- Listen to generated audio in browser
+
 ### Using ElevenLabs (Alternative Provider)
 ```bash
 export ELEVENLABS_API_KEY="your-elevenlabs-key"
@@ -111,3 +142,5 @@ The tool automatically assigns appropriate voices:
 - Supports unlimited speakers (automatically handles Google's 2-speaker-per-call limit via audio splicing)
 - Output is 24kHz mono WAV
 - For MP3 output, install ffmpeg: `brew install ffmpeg`
+- Standard mode: best for short conversations (under ~10 minutes of audio)
+- Audiobook mode: best for long texts (books, transcripts, etc.) - no practical limit
