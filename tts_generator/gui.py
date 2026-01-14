@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import tempfile
 from pathlib import Path
@@ -18,6 +19,23 @@ from .streaming import StreamingGenerator
 
 # Get list of voice names for dropdowns
 VOICE_CHOICES = sorted(GOOGLE_VOICES.keys())
+
+# Track temp files for cleanup
+_temp_files: list[str] = []
+
+
+def _cleanup_temp_files():
+    """Clean up temporary audio files on exit."""
+    for filepath in _temp_files:
+        try:
+            if os.path.exists(filepath):
+                os.unlink(filepath)
+        except Exception:
+            pass  # Ignore cleanup errors
+
+
+# Register cleanup on exit
+atexit.register(_cleanup_temp_files)
 
 SAMPLE_TEXT = """Provider: How are you feeling today?
 Patient: Much better, thank you for asking.
@@ -94,6 +112,9 @@ def generate_audio(text, voice1, voice2, voice3, voice4, pause_ms, audiobook_mod
     temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     output_path = Path(temp_file.name)
     temp_file.close()
+
+    # Track temp file for cleanup
+    _temp_files.append(str(output_path))
 
     if audiobook_mode:
         # Audiobook mode: chunk and stream

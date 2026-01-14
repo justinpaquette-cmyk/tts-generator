@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 import time
+import wave
 from datetime import datetime
 from pathlib import Path
 
@@ -149,15 +149,27 @@ class StreamingGenerator:
         return convert_raw_to_pydub(raw_audio)
 
     def _append_audio(self, audio: PydubSegment):
-        """Append audio segment to output file."""
-        if self.output_path.exists():
-            # Load existing and append
-            existing = PydubSegment.from_wav(str(self.output_path))
-            combined = existing + audio
-            combined.export(str(self.output_path), format="wav")
-        else:
-            # First chunk - just export
+        """Append audio segment to output file efficiently.
+
+        Uses wave module to append raw PCM data without reloading
+        the entire file into memory.
+        """
+        raw_data = audio.raw_data
+
+        if not self.output_path.exists():
+            # First chunk - create new file with proper WAV header
             audio.export(str(self.output_path), format="wav")
+        else:
+            # Append raw PCM data efficiently using wave module
+            # Read existing file parameters and frames
+            with wave.open(str(self.output_path), 'rb') as existing:
+                params = existing.getparams()
+                existing_frames = existing.readframes(existing.getnframes())
+
+            # Write back with new data appended
+            with wave.open(str(self.output_path), 'wb') as out:
+                out.setparams(params)
+                out.writeframes(existing_frames + raw_data)
 
     def _save_state(self, completed: int, total: int):
         """Save generation state for resume capability."""

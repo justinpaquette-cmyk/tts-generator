@@ -84,6 +84,9 @@ class TextChunker:
         current_speakers = set()
         current_size = 0
         chunk_index = 0
+        # Track chapter info for current chunk
+        current_is_chapter_start = False
+        current_chapter_title = None
 
         for line in lines:
             line_size = len(line.text.encode('utf-8')) + len(line.speaker.encode('utf-8')) + 2
@@ -93,17 +96,13 @@ class TextChunker:
 
             # Decide if we need to start a new chunk
             needs_new_chunk = False
-            reason = None
 
             if is_chapter and current_lines:
                 needs_new_chunk = True
-                reason = "chapter"
             elif line.speaker not in current_speakers and len(current_speakers) >= self.max_speakers:
                 needs_new_chunk = True
-                reason = "speakers"
             elif current_size + line_size > self.max_bytes and current_lines:
                 needs_new_chunk = True
-                reason = "size"
 
             # Save current chunk if needed
             if needs_new_chunk:
@@ -111,21 +110,26 @@ class TextChunker:
                     index=chunk_index,
                     lines=current_lines,
                     speakers=list(current_speakers),
+                    is_chapter_start=current_is_chapter_start,
+                    chapter_title=current_chapter_title,
                 ))
                 chunk_index += 1
                 current_lines = []
                 current_speakers = set()
                 current_size = 0
+                # Reset chapter tracking for new chunk
+                current_is_chapter_start = False
+                current_chapter_title = None
 
             # Add line to current chunk
             current_lines.append(line)
             current_speakers.add(line.speaker)
             current_size += line_size
 
-            # Mark chapter start
+            # Mark chapter start if this is first line of chunk and is a chapter marker
             if is_chapter and len(current_lines) == 1:
-                # This will be marked when chunk is saved
-                pass
+                current_is_chapter_start = True
+                current_chapter_title = chapter_title
 
         # Don't forget the last chunk
         if current_lines:
@@ -133,6 +137,8 @@ class TextChunker:
                 index=chunk_index,
                 lines=current_lines,
                 speakers=list(current_speakers),
+                is_chapter_start=current_is_chapter_start,
+                chapter_title=current_chapter_title,
             ))
 
         return chunks
