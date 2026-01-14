@@ -1,0 +1,3 @@
+Speaker A: Hello, how are you doing today?
+Provider: I'm doing well, thank you for asking. How can I help you?
+Speaker A: I just wanted to check in about the appointment.

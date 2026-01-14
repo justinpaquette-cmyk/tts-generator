@@ -1,0 +1,4 @@
+google-genai>=1.0.0
+elevenlabs>=1.0.0
+pydub>=0.25.1
+rich>=13.0.0
