@@ -61,6 +61,12 @@ class GoogleTTSProvider(TTSProvider):
             )
         self.timeout = timeout or self.DEFAULT_TIMEOUT
         self.client = genai.Client(api_key=self.api_key)
+        self.debug = False  # Enable for verbose logging
+
+    def _debug_log(self, message: str):
+        """Print debug message if debug mode is enabled."""
+        if self.debug:
+            print(f"[DEBUG] {message}")
 
     def generate_single_speaker(
         self,
@@ -101,6 +107,13 @@ class GoogleTTSProvider(TTSProvider):
         Returns:
             API response
         """
+        text_bytes = len(content.encode('utf-8'))
+        if speaker_configs:
+            speakers = [sc.speaker for sc in speaker_configs]
+            self._debug_log(f"API call: multi-speaker mode, speakers={speakers}, text={text_bytes} bytes")
+        else:
+            self._debug_log(f"API call: single-speaker mode, voice={voice}, text={text_bytes} bytes")
+
         if speaker_configs:
             # Multi-speaker mode
             config = types.GenerateContentConfig(

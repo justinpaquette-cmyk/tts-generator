@@ -25,7 +25,16 @@ def parse_text_file(content: str) -> list[DialogueLine]:
     current_text = []
 
     # Pattern to match speaker labels like "Speaker A:", "Provider:", etc.
-    speaker_pattern = re.compile(r'^([A-Za-z0-9 ]+):\s*(.*)$')
+    # Requirements:
+    # - Must start with a letter (not purely numeric like timestamps "10:30")
+    # - Can contain letters, numbers, and spaces
+    # - Must be followed by colon and then dialogue text
+    # - Negative lookahead to exclude URLs (http:, https:, ftp:)
+    speaker_pattern = re.compile(
+        r'^(?!https?:|ftp:)'  # Exclude URLs
+        r'([A-Za-z][A-Za-z0-9 ]*)'  # Speaker name (must start with letter)
+        r':\s*(.*)$'  # Colon followed by optional dialogue
+    )
 
     for line in content.split('\n'):
         line = line.strip()
@@ -34,16 +43,24 @@ def parse_text_file(content: str) -> list[DialogueLine]:
 
         match = speaker_pattern.match(line)
         if match:
-            # Save previous dialogue if exists
-            if current_speaker and current_text:
-                lines.append(DialogueLine(
-                    speaker=current_speaker,
-                    text=' '.join(current_text)
-                ))
-
-            current_speaker = match.group(1).strip()
+            speaker_name = match.group(1).strip()
             dialogue = match.group(2).strip()
-            current_text = [dialogue] if dialogue else []
+
+            # Additional validation: reject if speaker name is too short or suspicious
+            # (helps avoid matching things like "A: B" in technical content)
+            if len(speaker_name) >= 1:
+                # Save previous dialogue if exists
+                if current_speaker and current_text:
+                    lines.append(DialogueLine(
+                        speaker=current_speaker,
+                        text=' '.join(current_text)
+                    ))
+
+                current_speaker = speaker_name
+                current_text = [dialogue] if dialogue else []
+            elif current_speaker:
+                # Treat as continuation
+                current_text.append(line)
         elif current_speaker:
             # Continuation of previous speaker's dialogue
             current_text.append(line)

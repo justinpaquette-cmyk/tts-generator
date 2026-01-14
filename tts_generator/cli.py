@@ -46,6 +46,31 @@ def list_available_voices():
     console.print(table)
 
 
+def confirm_overwrite(path: Path) -> bool:
+    """Ask user to confirm overwriting an existing file."""
+    console.print(f"[yellow]Warning:[/yellow] Output file already exists: {path}")
+    response = console.input("[yellow]Overwrite? [y/N]:[/yellow] ")
+    return response.lower() in ('y', 'yes')
+
+
+def estimate_duration(lines: list, words_per_minute: int = 150) -> float:
+    """Estimate audio duration in seconds from dialogue lines."""
+    total_words = sum(len(line.text.split()) for line in lines)
+    return (total_words / words_per_minute) * 60
+
+
+def format_duration(seconds: float) -> str:
+    """Format duration in human-readable format."""
+    if seconds < 60:
+        return f"{seconds:.0f} seconds"
+    elif seconds < 3600:
+        minutes = seconds / 60
+        return f"{minutes:.1f} minutes"
+    else:
+        hours = seconds / 3600
+        return f"{hours:.1f} hours"
+
+
 def run_standard_mode(args, lines, speakers, voice_manager, provider):
     """Run standard (non-audiobook) generation."""
     splicer = AudioSplicer(
@@ -215,6 +240,16 @@ Audiobook mode (for large files):
         default=2000,
         help="Pause duration at chapter breaks in ms (default: 2000)",
     )
+    parser.add_argument(
+        "-y", "--yes",
+        action="store_true",
+        help="Skip confirmation prompts (overwrite existing files)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose debug output",
+    )
 
     args = parser.parse_args()
 
@@ -233,14 +268,41 @@ Audiobook mode (for large files):
         console.print(f"[red]Error:[/red] Input file not found: {input_path}")
         return 1
 
+    # Validate file is readable
+    try:
+        input_path.read_text(encoding='utf-8')
+    except PermissionError:
+        console.print(f"[red]Error:[/red] Permission denied reading: {input_path}")
+        return 1
+    except UnicodeDecodeError:
+        console.print(f"[red]Error:[/red] File is not valid UTF-8 text: {input_path}")
+        return 1
+
+    # Check output file overwrite
+    output_path = Path(args.output)
+    if output_path.exists() and not args.resume:
+        if not args.yes and not confirm_overwrite(output_path):
+            console.print("[yellow]Cancelled.[/yellow]")
+            return 0
+
     try:
         # Parse input file
         console.print(f"[cyan]Parsing:[/cyan] {input_path}")
         lines = parse_file(input_path)
+
+        if not lines:
+            console.print("[red]Error:[/red] No dialogue found in input file.")
+            console.print("[dim]Expected format: 'Speaker: dialogue text' or JSON array[/dim]")
+            return 1
+
         speakers = get_unique_speakers(lines)
 
         console.print(f"[green]Found:[/green] {len(lines)} dialogue lines, {len(speakers)} speakers")
         console.print(f"[dim]Speakers:[/dim] {', '.join(speakers)}")
+
+        # Show duration estimate
+        est_duration = estimate_duration(lines)
+        console.print(f"[dim]Estimated duration:[/dim] {format_duration(est_duration)}")
 
         # Set up voice manager
         voice_manager = VoiceManager(provider="google")
@@ -267,6 +329,11 @@ Audiobook mode (for large files):
         # Initialize TTS provider
         provider = GoogleTTSProvider(api_key=args.api_key)
         console.print("[cyan]Provider:[/cyan] google")
+
+        # Enable debug mode if requested
+        if args.debug:
+            console.print("[dim]Debug mode enabled[/dim]")
+            provider.debug = True
 
         # Run appropriate mode
         if args.audiobook:

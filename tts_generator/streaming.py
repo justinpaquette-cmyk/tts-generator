@@ -26,6 +26,7 @@ class StreamingGenerator:
         output_path: str | Path,
         pause_ms: int = 300,
         chapter_pause_ms: int = 2000,
+        state_save_interval: int = 5,
     ):
         """Initialize streaming generator.
 
@@ -35,12 +36,14 @@ class StreamingGenerator:
             output_path: Path for output audio file
             pause_ms: Pause between regular chunks (ms)
             chapter_pause_ms: Pause at chapter breaks (ms)
+            state_save_interval: Save state every N chunks (default: 5)
         """
         self.provider = provider
         self.voice_manager = voice_manager
         self.output_path = Path(output_path)
         self.pause_ms = pause_ms
         self.chapter_pause_ms = chapter_pause_ms
+        self.state_save_interval = state_save_interval
 
         # State file for resume capability
         self.state_path = self.output_path.with_suffix('.state.json')
@@ -104,8 +107,11 @@ class StreamingGenerator:
                 self.stats["chunks_completed"] = i + 1
                 self.stats["total_duration_ms"] += len(audio)
 
-                # Save state for resume
-                self._save_state(i + 1, len(chunks))
+                # Save state periodically (every N chunks, or on last chunk)
+                is_last_chunk = (i + 1) == len(chunks)
+                should_save = (i + 1) % self.state_save_interval == 0 or is_last_chunk
+                if should_save:
+                    self._save_state(i + 1, len(chunks))
 
                 # Progress callback
                 if progress_callback:
