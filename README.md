@@ -6,7 +6,7 @@ Multi-speaker text-to-speech tool using Google AI Studio (Gemini 2.5 TTS).
 
 ```bash
 # Clone and setup
-git clone https://github.com/YOUR_USERNAME/tts-generator.git
+git clone https://github.com/justinpaquette-cmyk/tts-generator.git
 cd tts-generator
 python3 -m pip install -r requirements.txt
 
