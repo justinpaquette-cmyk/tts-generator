@@ -49,6 +49,7 @@ Provider: That's great to hear.
 | Option | Description | Example |
 |--------|-------------|---------|
 | `-o, --output` | Output file path | `-o output.wav` |
+| `--format` | Output format (wav/mp3). Auto-detected from filename | `--format mp3` |
 | `--voices` | Manual voice assignment | `--voices "Provider:Charon,Patient:Achernar"` |
 | `--show-assignments` | Display voice assignments | `--show-assignments` |
 | `--style` | Style/mood direction | `--style "calm, professional"` |
@@ -56,12 +57,18 @@ Provider: That's great to hear.
 | `--list-voices` | Show available voices | `--list-voices` |
 | `--provider` | TTS provider (google/elevenlabs) | `--provider google` |
 
+**Note:** MP3 format is recommended for audiobooks and web playback, as concatenated WAV files can have seeking issues in browsers. If your output filename ends in `.mp3`, the format is auto-detected.
+
 ## Workflow for Agent
 
 1. **Receive conversation transcript** from user
 2. **Save transcript** to a `.txt` file in the examples folder
 3. **Run the TTS command**:
    ```bash
+   # For web/mobile playback (recommended):
+   python3 -m tts_generator.cli examples/<filename>.txt -o <output_name>.mp3 --show-assignments
+
+   # For lossless audio:
    python3 -m tts_generator.cli examples/<filename>.txt -o <output_name>.wav --show-assignments
    ```
 4. **Verify output** by checking file exists and size
@@ -77,11 +84,11 @@ Patient: I've been having headaches for the past week.
 Doctor: I see. Let me ask you a few questions about that.
 EOF
 
-# Generate audio
-python3 -m tts_generator.cli examples/user_conversation.txt -o user_audio.wav --show-assignments
+# Generate audio (MP3 for web/mobile playback)
+python3 -m tts_generator.cli examples/user_conversation.txt -o user_audio.mp3 --show-assignments
 
 # Check output
-ls -la user_audio.wav
+ls -la user_audio.mp3
 ```
 
 ## Troubleshooting
@@ -96,8 +103,8 @@ export GOOGLE_API_KEY="your-key-here"
 python3 -m pip install -r requirements.txt
 ```
 
-### Warnings about ffmpeg
-These are safe to ignore for WAV output. For MP3, install ffmpeg:
+### "MP3 output requires ffmpeg" error
+Install ffmpeg to enable MP3 output:
 ```bash
 brew install ffmpeg
 ```

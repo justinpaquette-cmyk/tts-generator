@@ -16,6 +16,52 @@ from .splicer import convert_raw_to_pydub
 from .voices import VoiceManager
 
 
+# Target audio format for consistency (matches Google TTS output)
+TARGET_SAMPLE_RATE = 24000
+TARGET_CHANNELS = 1
+TARGET_SAMPLE_WIDTH = 2  # 16-bit
+
+
+def normalize_audio(audio: PydubSegment) -> PydubSegment:
+    """Normalize audio to target format for consistent concatenation.
+
+    Ensures all audio chunks have the same sample rate, channels, and
+    sample width to prevent audio corruption at boundaries.
+    """
+    # Convert to target format if needed
+    if audio.frame_rate != TARGET_SAMPLE_RATE:
+        audio = audio.set_frame_rate(TARGET_SAMPLE_RATE)
+    if audio.channels != TARGET_CHANNELS:
+        audio = audio.set_channels(TARGET_CHANNELS)
+    if audio.sample_width != TARGET_SAMPLE_WIDTH:
+        audio = audio.set_sample_width(TARGET_SAMPLE_WIDTH)
+    return audio
+
+
+def crossfade_segments(seg1: PydubSegment, seg2: PydubSegment, crossfade_ms: int = 25) -> PydubSegment:
+    """Join two audio segments with a crossfade to prevent clicking artifacts.
+
+    Args:
+        seg1: First audio segment
+        seg2: Second audio segment
+        crossfade_ms: Duration of crossfade in milliseconds (default: 25ms)
+
+    Returns:
+        Combined audio segment with smooth transition
+    """
+    if crossfade_ms <= 0:
+        return seg1 + seg2
+
+    # Ensure crossfade doesn't exceed segment lengths
+    crossfade_ms = min(crossfade_ms, len(seg1), len(seg2))
+
+    if crossfade_ms < 5:
+        # Too short for meaningful crossfade
+        return seg1 + seg2
+
+    return seg1.append(seg2, crossfade=crossfade_ms)
+
+
 class StreamingGenerator:
     """Generates audio chunk-by-chunk, streaming to disk."""
 
@@ -27,6 +73,7 @@ class StreamingGenerator:
         pause_ms: int = 300,
         chapter_pause_ms: int = 2000,
         state_save_interval: int = 5,
+        crossfade_ms: int = 25,
     ):
         """Initialize streaming generator.
 
@@ -37,6 +84,7 @@ class StreamingGenerator:
             pause_ms: Pause between regular chunks (ms)
             chapter_pause_ms: Pause at chapter breaks (ms)
             state_save_interval: Save state every N chunks (default: 5)
+            crossfade_ms: Crossfade duration at chunk boundaries (default: 25ms)
         """
         self.provider = provider
         self.voice_manager = voice_manager
@@ -44,9 +92,13 @@ class StreamingGenerator:
         self.pause_ms = pause_ms
         self.chapter_pause_ms = chapter_pause_ms
         self.state_save_interval = state_save_interval
+        self.crossfade_ms = crossfade_ms
 
         # State file for resume capability
         self.state_path = self.output_path.with_suffix('.state.json')
+
+        # Track audio parameters for consistency checking
+        self._audio_params = None
 
         # Track generation stats
         self.stats = {
@@ -94,14 +146,21 @@ class StreamingGenerator:
                 # Generate audio for this chunk
                 audio = self._generate_chunk(chunk)
 
-                # Add pause between chunks
+                # Normalize audio to ensure consistent format
+                audio = normalize_audio(audio)
+
+                # Add pause between chunks (with crossfade for smooth transitions)
                 if i > 0:
                     pause_duration = self.chapter_pause_ms if chunk.is_chapter_start else self.pause_ms
-                    silence = PydubSegment.silent(duration=pause_duration, frame_rate=24000)
+                    silence = PydubSegment.silent(
+                        duration=pause_duration,
+                        frame_rate=TARGET_SAMPLE_RATE,
+                    )
+                    # Prepend silence, then we'll crossfade when appending
                     audio = silence + audio
 
-                # Append to output file
-                self._append_audio(audio)
+                # Append to output file with crossfade
+                self._append_audio(audio, use_crossfade=(i > 0))
 
                 # Update stats
                 self.stats["chunks_completed"] = i + 1
@@ -154,28 +213,49 @@ class StreamingGenerator:
 
         return convert_raw_to_pydub(raw_audio)
 
-    def _append_audio(self, audio: PydubSegment):
-        """Append audio segment to output file efficiently.
+    def _append_audio(self, audio: PydubSegment, use_crossfade: bool = False):
+        """Append audio segment to output file with optional crossfade.
 
-        Uses wave module to append raw PCM data without reloading
-        the entire file into memory.
+        For the first chunk, creates a new WAV file. For subsequent chunks,
+        loads the existing audio, applies crossfade at the boundary, and
+        re-exports. This ensures proper audio alignment and prevents
+        artifacts at chunk boundaries.
+
+        Args:
+            audio: The audio segment to append
+            use_crossfade: Whether to apply crossfade at the boundary
         """
-        raw_data = audio.raw_data
-
         if not self.output_path.exists():
             # First chunk - create new file with proper WAV header
+            # Store the audio parameters for consistency checking
+            self._audio_params = {
+                'frame_rate': audio.frame_rate,
+                'channels': audio.channels,
+                'sample_width': audio.sample_width,
+            }
             audio.export(str(self.output_path), format="wav")
         else:
-            # Append raw PCM data efficiently using wave module
-            # Read existing file parameters and frames
-            with wave.open(str(self.output_path), 'rb') as existing:
-                params = existing.getparams()
-                existing_frames = existing.readframes(existing.getnframes())
+            # Load existing audio
+            existing = PydubSegment.from_wav(str(self.output_path))
 
-            # Write back with new data appended
-            with wave.open(str(self.output_path), 'wb') as out:
-                out.setparams(params)
-                out.writeframes(existing_frames + raw_data)
+            # Verify format consistency (should be guaranteed by normalize_audio,
+            # but check anyway for safety)
+            if (existing.frame_rate != audio.frame_rate or
+                existing.channels != audio.channels or
+                existing.sample_width != audio.sample_width):
+                # Normalize the new audio to match existing
+                audio = audio.set_frame_rate(existing.frame_rate)
+                audio = audio.set_channels(existing.channels)
+                audio = audio.set_sample_width(existing.sample_width)
+
+            # Combine with crossfade for smooth transition
+            if use_crossfade and self.crossfade_ms > 0:
+                combined = crossfade_segments(existing, audio, self.crossfade_ms)
+            else:
+                combined = existing + audio
+
+            # Export combined audio
+            combined.export(str(self.output_path), format="wav")
 
     def _save_state(self, completed: int, total: int):
         """Save generation state for resume capability."""

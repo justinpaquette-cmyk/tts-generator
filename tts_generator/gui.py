@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import atexit
 import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -20,8 +22,36 @@ from .streaming import StreamingGenerator
 # Get list of voice names for dropdowns
 VOICE_CHOICES = sorted(GOOGLE_VOICES.keys())
 
+# Output format choices
+FORMAT_CHOICES = ["WAV", "MP3"]
+
 # Track temp files for cleanup
 _temp_files: list[str] = []
+
+
+def convert_wav_to_mp3(wav_path: Path, mp3_path: Path) -> Path:
+    """Convert WAV file to MP3 using ffmpeg."""
+    if not shutil.which('ffmpeg'):
+        raise gr.Error("MP3 output requires ffmpeg. Install with: brew install ffmpeg")
+
+    cmd = [
+        'ffmpeg', '-y',
+        '-i', str(wav_path),
+        '-codec:a', 'libmp3lame',
+        '-qscale:a', '2',
+        str(mp3_path)
+    ]
+
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        raise gr.Error(f"ffmpeg conversion failed: {e.stderr}")
+
+    # Delete intermediate WAV
+    if wav_path.exists():
+        wav_path.unlink()
+
+    return mp3_path
 
 
 def _cleanup_temp_files():
@@ -82,7 +112,7 @@ def detect_speakers(text):
     return updates
 
 
-def generate_audio(text, voice1, voice2, voice3, voice4, pause_ms, audiobook_mode, chapter_pause_ms, progress=gr.Progress()):
+def generate_audio(text, voice1, voice2, voice3, voice4, pause_ms, audiobook_mode, chapter_pause_ms, output_format, progress=gr.Progress()):
     """Generate TTS audio from conversation text."""
     if not text or not text.strip():
         return None
@@ -108,13 +138,16 @@ def generate_audio(text, voice1, voice2, voice3, voice4, pause_ms, audiobook_mod
     # Initialize provider
     provider = GoogleTTSProvider(api_key=api_key)
 
-    # Create temp file for output
+    # Determine if we need MP3 output
+    want_mp3 = output_format == "MP3"
+
+    # Create temp file for WAV output
     temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    output_path = Path(temp_file.name)
+    wav_path = Path(temp_file.name)
     temp_file.close()
 
     # Track temp file for cleanup
-    _temp_files.append(str(output_path))
+    _temp_files.append(str(wav_path))
 
     if audiobook_mode:
         # Audiobook mode: chunk and stream
@@ -132,7 +165,7 @@ def generate_audio(text, voice1, voice2, voice3, voice4, pause_ms, audiobook_mod
         generator = StreamingGenerator(
             provider=provider,
             voice_manager=voice_manager,
-            output_path=output_path,
+            output_path=wav_path,
             pause_ms=int(pause_ms),
             chapter_pause_ms=int(chapter_pause_ms),
         )
@@ -150,9 +183,16 @@ def generate_audio(text, voice1, voice2, voice3, voice4, pause_ms, audiobook_mod
             pause_ms=int(pause_ms),
         )
         audio = splicer.generate_conversation(lines)
-        splicer.export(audio, output_path)
+        splicer.export(audio, wav_path)
 
-    return str(output_path)
+    # Convert to MP3 if requested
+    if want_mp3:
+        mp3_path = wav_path.with_suffix('.mp3')
+        _temp_files.append(str(mp3_path))
+        convert_wav_to_mp3(wav_path, mp3_path)
+        return str(mp3_path)
+
+    return str(wav_path)
 
 
 def create_demo():
@@ -185,6 +225,14 @@ def create_demo():
                     value=300,
                     step=50,
                     label="Pause between speakers (ms)",
+                )
+
+                gr.Markdown("### Output Format")
+                format_dropdown = gr.Dropdown(
+                    choices=FORMAT_CHOICES,
+                    value="MP3",
+                    label="Format",
+                    info="MP3 recommended for web/mobile playback",
                 )
 
                 gr.Markdown("### Audiobook Mode")
@@ -221,7 +269,7 @@ def create_demo():
         # Wire up generate button
         generate_btn.click(
             fn=generate_audio,
-            inputs=[text_input, voice1, voice2, voice3, voice4, pause_slider, audiobook_checkbox, chapter_pause_slider],
+            inputs=[text_input, voice1, voice2, voice3, voice4, pause_slider, audiobook_checkbox, chapter_pause_slider, format_dropdown],
             outputs=[audio_output],
         )
 

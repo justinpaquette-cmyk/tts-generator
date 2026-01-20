@@ -13,6 +13,23 @@ from .providers.base import AudioSegment, TTSProvider
 from .voices import VoiceManager
 
 
+# Target audio format for consistency (matches Google TTS output)
+TARGET_SAMPLE_RATE = 24000
+TARGET_CHANNELS = 1
+TARGET_SAMPLE_WIDTH = 2  # 16-bit
+
+
+def normalize_audio(audio: PydubSegment) -> PydubSegment:
+    """Normalize audio to target format for consistent concatenation."""
+    if audio.frame_rate != TARGET_SAMPLE_RATE:
+        audio = audio.set_frame_rate(TARGET_SAMPLE_RATE)
+    if audio.channels != TARGET_CHANNELS:
+        audio = audio.set_channels(TARGET_CHANNELS)
+    if audio.sample_width != TARGET_SAMPLE_WIDTH:
+        audio = audio.set_sample_width(TARGET_SAMPLE_WIDTH)
+    return audio
+
+
 def group_dialogue_by_speaker_pairs(
     lines: list[DialogueLine],
     max_speakers: int = 2
@@ -134,31 +151,40 @@ class AudioSplicer:
                     dialogue, style_prompt
                 )
 
-            audio_segments.append(convert_raw_to_pydub(raw_audio))
+            # Normalize audio for consistent format
+            audio_segment = normalize_audio(convert_raw_to_pydub(raw_audio))
+            audio_segments.append(audio_segment)
 
         # Splice all segments together with pauses
         return self._splice_segments(audio_segments)
 
     def _splice_segments(self, segments: list[PydubSegment]) -> PydubSegment:
-        """Splice audio segments together with pauses between them."""
+        """Splice audio segments together with pauses and crossfade."""
         if not segments:
             raise ValueError("No segments to splice")
 
         if len(segments) == 1:
             return segments[0]
 
-        # Create silence for pauses
-        # Use the first segment's properties for the silence
-        first = segments[0]
+        # Create silence for pauses using target format
         silence = PydubSegment.silent(
             duration=self.pause_ms,
-            frame_rate=first.frame_rate,
+            frame_rate=TARGET_SAMPLE_RATE,
         )
 
-        # Concatenate with pauses
+        # Concatenate with pauses and small crossfade for smooth transitions
         result = segments[0]
+        crossfade_ms = 25  # Small crossfade to prevent click artifacts
+
         for segment in segments[1:]:
-            result = result + silence + segment
+            # Add silence then segment with crossfade
+            with_pause = silence + segment
+            # Apply crossfade at boundary (min of crossfade_ms and segment lengths)
+            fade_duration = min(crossfade_ms, len(result), len(with_pause))
+            if fade_duration >= 5:
+                result = result.append(with_pause, crossfade=fade_duration)
+            else:
+                result = result + with_pause
 
         return result
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -71,7 +73,73 @@ def format_duration(seconds: float) -> str:
         return f"{hours:.1f} hours"
 
 
-def run_standard_mode(args, lines, speakers, voice_manager, provider):
+def detect_output_format(output_path: str, explicit_format: str | None) -> str:
+    """Detect output format from filename or explicit flag.
+
+    Args:
+        output_path: Path to output file
+        explicit_format: Explicitly specified format (wav/mp3) or None
+
+    Returns:
+        Format string: 'wav' or 'mp3'
+    """
+    if explicit_format:
+        return explicit_format.lower()
+
+    # Auto-detect from extension
+    ext = Path(output_path).suffix.lower()
+    if ext == '.mp3':
+        return 'mp3'
+    return 'wav'
+
+
+def convert_to_mp3(wav_path: Path, mp3_path: Path, delete_wav: bool = True) -> Path:
+    """Convert WAV file to MP3 using ffmpeg.
+
+    Args:
+        wav_path: Path to input WAV file
+        mp3_path: Path for output MP3 file
+        delete_wav: Whether to delete the intermediate WAV file
+
+    Returns:
+        Path to the MP3 file
+
+    Raises:
+        RuntimeError: If ffmpeg is not installed or conversion fails
+    """
+    # Check if ffmpeg is available
+    if not shutil.which('ffmpeg'):
+        raise RuntimeError(
+            "MP3 output requires ffmpeg. Install with: brew install ffmpeg"
+        )
+
+    # Run ffmpeg conversion
+    cmd = [
+        'ffmpeg', '-y',  # Overwrite output
+        '-i', str(wav_path),
+        '-codec:a', 'libmp3lame',
+        '-qscale:a', '2',  # High quality VBR
+        str(mp3_path)
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"ffmpeg conversion failed: {e.stderr}")
+
+    # Delete intermediate WAV if requested
+    if delete_wav and wav_path.exists():
+        wav_path.unlink()
+
+    return mp3_path
+
+
+def run_standard_mode(args, lines, speakers, voice_manager, provider, output_format: str):
     """Run standard (non-audiobook) generation."""
     splicer = AudioSplicer(
         provider=provider,
@@ -95,20 +163,35 @@ def run_standard_mode(args, lines, speakers, voice_manager, provider):
             progress_callback=update_progress,
         )
 
-    # Export
-    output_path = Path(args.output)
-    splicer.export(audio, output_path)
+    # Determine output paths
+    final_output_path = Path(args.output)
 
-    console.print(f"[green]Success![/green] Audio saved to: {output_path}")
+    if output_format == 'mp3':
+        # Generate to WAV first, then convert
+        wav_path = final_output_path.with_suffix('.wav')
+        splicer.export(audio, wav_path)
+
+        console.print("[cyan]Converting to MP3...[/cyan]")
+        convert_to_mp3(wav_path, final_output_path, delete_wav=True)
+    else:
+        splicer.export(audio, final_output_path)
+
+    console.print(f"[green]Success![/green] Audio saved to: {final_output_path}")
     console.print(f"[dim]Duration:[/dim] {len(audio) / 1000:.1f} seconds")
 
 
-def run_audiobook_mode(args, lines, speakers, voice_manager, provider):
+def run_audiobook_mode(args, lines, speakers, voice_manager, provider, output_format: str):
     """Run audiobook mode with chunking and streaming."""
     from .chunker import TextChunker
     from .streaming import StreamingGenerator
 
-    output_path = Path(args.output)
+    final_output_path = Path(args.output)
+
+    # For MP3 output, we generate to WAV first then convert
+    if output_format == 'mp3':
+        wav_output_path = final_output_path.with_suffix('.wav')
+    else:
+        wav_output_path = final_output_path
 
     # Chunk the text
     console.print("[cyan]Chunking text for audiobook mode...[/cyan]")
@@ -124,20 +207,20 @@ def run_audiobook_mode(args, lines, speakers, voice_manager, provider):
     console.print(f"[dim]Estimated duration:[/dim] {stats['estimated_duration_min']:.1f} minutes")
 
     # Check for resume
-    state_path = output_path.with_suffix('.state.json')
+    state_path = wav_output_path.with_suffix('.state.json')
     if args.resume and state_path.exists():
         console.print("[yellow]Resuming from previous state...[/yellow]")
     elif state_path.exists() and not args.resume:
         console.print("[yellow]Warning:[/yellow] State file found. Use --resume to continue, or delete it to start fresh.")
-        if output_path.exists():
-            output_path.unlink()
+        if wav_output_path.exists():
+            wav_output_path.unlink()
         state_path.unlink()
 
     # Create streaming generator
     generator = StreamingGenerator(
         provider=provider,
         voice_manager=voice_manager,
-        output_path=output_path,
+        output_path=wav_output_path,
         pause_ms=args.pause,
         chapter_pause_ms=args.chapter_pause,
     )
@@ -163,7 +246,12 @@ def run_audiobook_mode(args, lines, speakers, voice_manager, provider):
             resume=args.resume,
         )
 
-    console.print(f"[green]Success![/green] Audiobook saved to: {output_path}")
+    # Convert to MP3 if needed
+    if output_format == 'mp3':
+        console.print("[cyan]Converting to MP3...[/cyan]")
+        convert_to_mp3(wav_output_path, final_output_path, delete_wav=True)
+
+    console.print(f"[green]Success![/green] Audiobook saved to: {final_output_path}")
     console.print(f"[dim]Total duration:[/dim] {generator.stats['total_duration_ms'] / 1000 / 60:.1f} minutes")
 
 
@@ -175,12 +263,16 @@ def main():
         epilog="""
 Examples:
   tts-generator input.txt -o output.wav
+  tts-generator input.txt -o output.mp3 --format mp3
   tts-generator input.txt --voices "Speaker A:Kore,Provider:Charon"
   tts-generator --list-voices
 
 Audiobook mode (for large files):
-  tts-generator book.txt -o audiobook.wav --audiobook
+  tts-generator book.txt -o audiobook.mp3 --audiobook
   tts-generator book.txt -o audiobook.wav --audiobook --resume
+
+Note: MP3 format is recommended for audiobooks and web playback, as
+      concatenated WAV files can have seeking issues in browsers.
         """,
     )
 
@@ -193,6 +285,11 @@ Audiobook mode (for large files):
         "-o", "--output",
         default="output.wav",
         help="Output audio file (default: output.wav)",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["wav", "mp3"],
+        help="Output format (wav or mp3). Auto-detected from output filename if not specified.",
     )
     parser.add_argument(
         "--voices",
@@ -335,11 +432,15 @@ Audiobook mode (for large files):
             console.print("[dim]Debug mode enabled[/dim]")
             provider.debug = True
 
+        # Detect output format
+        output_format = detect_output_format(args.output, args.format)
+        console.print(f"[cyan]Output format:[/cyan] {output_format.upper()}")
+
         # Run appropriate mode
         if args.audiobook:
-            run_audiobook_mode(args, lines, speakers, voice_manager, provider)
+            run_audiobook_mode(args, lines, speakers, voice_manager, provider, output_format)
         else:
-            run_standard_mode(args, lines, speakers, voice_manager, provider)
+            run_standard_mode(args, lines, speakers, voice_manager, provider, output_format)
 
         return 0
 
